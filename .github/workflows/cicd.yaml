@@ -22,7 +22,7 @@ jobs:
           file_or_dir: k8s/
 
   # --------------------------
-  # 2️⃣ Trivy Config Scan
+  # 2️⃣ Trivy Config Scan (Fixed)
   # --------------------------
   trivy_config_scan:
     name: Trivy Config Scan
@@ -36,14 +36,14 @@ jobs:
         uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: config
-          hide-progress: true
-          ignore-unfixed: true
+          format: table
           exit-code: 0
-          scanners: config
-          path: k8s/
+          ignore-unfixed: true
+          hide-progress: true
+          input: k8s/
 
   # --------------------------
-  # 3️⃣ Validate Kubernetes Manifests (without API schema)
+  # 3️⃣ Validate Kubernetes Manifests (client-side)
   # --------------------------
   validate_k8s:
     name: Validate Kubernetes Manifests
@@ -97,8 +97,8 @@ jobs:
           kubectl apply -f k8s/mongo-pvc.yaml --validate=false
           kubectl apply -f k8s/mongo-deployment.yaml --validate=false
           kubectl apply -f k8s/mongo-service.yaml --validate=false
-          kubectl get pods -l app=mongodb
-          kubectl get svc -l app=mongodb
+          kubectl get pods -l app=mongo
+          kubectl get svc -l app=mongo
 
   # --------------------------
   # 5️⃣ Health Check Stage
@@ -122,5 +122,5 @@ jobs:
       - name: Check MongoDB Pod and Service
         run: |
           echo "Verifying MongoDB pod and service status..."
-          kubectl get pods -l app=mongodb
-          kubectl get svc -l app=mongodb
+          kubectl get pods -l app=mongo
+          kubectl get svc -l app=mongo
