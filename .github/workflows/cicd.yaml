@@ -6,94 +6,45 @@ on:
       - main
 
 jobs:
-  # ------------------------------
-  # 1️⃣ YAML LINT STAGE
-  # ------------------------------
+  # -------------------------------
+  # 1️⃣ YAML Linting Stage
+  # -------------------------------
   lint:
-    name: Lint Kubernetes YAMLs
+    name: Lint YAML files
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Lint YAML files
+      - name: Lint Kubernetes YAML files
         uses: ibiqlik/action-yamllint@v3
         with:
-          file_or_dir: ./k8s
+          file_or_dir: k8s/
+          config_file: .yamllint.yml
 
-  # ------------------------------
-  # 2️⃣ VALIDATE MANIFESTS
-  # ------------------------------
+  # -------------------------------
+  # 2️⃣ Validate K8s Manifests (Dry Run)
+  # -------------------------------
   validate:
     name: Validate Kubernetes Manifests
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install kubectl
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y kubectl
-
-      - name: Validate YAML Syntax
-        run: |
-          kubectl apply --dry-run=client -f k8s/ --validate=false
-
-  # ------------------------------
-  # 3️⃣ SECURITY CHECK
-  # ------------------------------
-  security-check:
-    name: Secret Leak Scan
-    runs-on: ubuntu-latest
-    needs: validate
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Check for secrets in YAML
-        run: |
-          echo "Scanning for possible secrets..."
-          if grep -R "password:" k8s/ || grep -R "secret" k8s/; then
-            echo "⚠️ Warning: Potential secret detected!"
-          else
-            echo "✅ No sensitive data found."
-          fi
-
-  # ------------------------------
-  # 4️⃣ BUILD CONFIGMAPS (OPTIONAL)
-  # ------------------------------
-  build-configmap:
-    name: Build ConfigMap Stage
-    runs-on: ubuntu-latest
-    needs: security-check
-    steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Prepare ConfigMap
+
+      - name: Validate K8s YAML syntax
         run: |
-          echo "Preparing MongoDB ConfigMap..."
-          mkdir -p k8s/generated
-          cat <<EOF > k8s/generated/mongo-configmap.yaml
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: mongo-config
-          data:
-            MONGO_INITDB_ROOT_USERNAME: admin
-            MONGO_INITDB_ROOT_PASSWORD: password123
-          EOF
-          echo "✅ ConfigMap generated successfully"
+          kubectl apply --dry-run=client -f k8s/ --validate=false
+        continue-on-error: false
 
-  # ------------------------------
-  # 5️⃣ DEPLOY TO GKE
-  # ------------------------------
-  deploy:
-    name: Deploy MongoDB to GKE
+  # -------------------------------
+  # 3️⃣ Authenticate and Configure GCP
+  # -------------------------------
+  setup:
+    name: Configure GCP and GKE
     runs-on: ubuntu-latest
-    needs: build-configmap
-
+    needs: validate
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -103,98 +54,72 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Setup gcloud
+      - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: modern-saga-472703-k3
           export_default_credentials: true
 
-      - name: Install GKE Auth Plugin
+      - name: Install GKE auth plugin
         run: |
           gcloud components install gke-gcloud-auth-plugin --quiet
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
-      - name: Get GKE Credentials
+      - name: Get GKE credentials
         run: |
           gcloud container clusters get-credentials test-demo-cluster \
             --zone us-central1-a --project modern-saga-472703-k3
 
-      - name: Deploy MongoDB Resources
-        run: |
-          kubectl apply -f k8s/ --validate=false
-          kubectl apply -f k8s/generated/mongo-configmap.yaml --validate=false
+  # -------------------------------
+  # 4️⃣ Deploy MongoDB to GKE
+  # -------------------------------
+  deploy:
+    name: Deploy MongoDB to GKE
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # ------------------------------
-  # 6️⃣ VERIFY DEPLOYMENT
-  # ------------------------------
-  verify:
-    name: Verify MongoDB Deployment
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: modern-saga-472703-k3
+          export_default_credentials: true
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials test-demo-cluster \
+            --zone us-central1-a --project modern-saga-472703-k3
+
+      - name: Apply Kubernetes Manifests
+        run: |
+          kubectl apply -f k8s/mongo-configmap.yaml --validate=false
+          kubectl apply -f k8s/mongo-secret.yaml --validate=false
+          kubectl apply -f k8s/mongo-pvc.yaml --validate=false
+          kubectl apply -f k8s/mongo-deployment.yaml --validate=false
+          kubectl apply -f k8s/mongo-service.yaml --validate=false
+
+      - name: Verify MongoDB Deployment
+        run: |
+          kubectl get pods -l app=mongo
+          kubectl get svc -l app=mongo
+          kubectl rollout status deployment/mongo
+
+  # -------------------------------
+  # 5️⃣ Post-deployment Health Check
+  # -------------------------------
+  health-check:
+    name: Health Check MongoDB
     runs-on: ubuntu-latest
     needs: deploy
     steps:
-      - name: Authenticate to GKE
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: modern-saga-472703-k3
-          export_default_credentials: true
-
-      - name: Get Cluster Credentials
+      - name: Verify MongoDB Pod Health
         run: |
-          gcloud container clusters get-credentials test-demo-cluster \
-            --zone us-central1-a --project modern-saga-472703-k3
-
-      - name: Check Pods and Services
-        run: |
-          echo "🔍 Checking MongoDB pods..."
-          kubectl get pods -l app=mongo
-          echo "🔍 Checking MongoDB services..."
-          kubectl get svc -l app=mongo
-
-  # ------------------------------
-  # 7️⃣ HEALTH CHECK STAGE
-  # ------------------------------
-  health-check:
-    name: MongoDB Health Check
-    runs-on: ubuntu-latest
-    needs: verify
-    steps:
-      - name: Authenticate to GKE
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: modern-saga-472703-k3
-          export_default_credentials: true
-
-      - name: Get GKE Credentials
-        run: |
-          gcloud container clusters get-credentials test-demo-cluster \
-            --zone us-central1-a --project modern-saga-472703-k3
-
-      - name: Health Check MongoDB Pod
-        run: |
-          POD=$(kubectl get pod -l app=mongo -o jsonpath="{.items[0].metadata.name}")
-          kubectl exec $POD -- mongo --eval "db.runCommand({ ping: 1 })"
-          echo "✅ MongoDB is healthy and responding."
-
-  # ------------------------------
-  # 8️⃣ CLEANUP STAGE
-  # ------------------------------
-  cleanup:
-    name: Cleanup Workspace
-    runs-on: ubuntu-latest
-    needs: health-check
-    steps:
-      - name: Clean up temporary files
-        run: |
-          echo "🧹 Cleaning up workspace..."
-          rm -rf k8s/generated
-          echo "✅ Cleanup completed successfully."
+          POD_NAME=$(kubectl get pods -l app=mongo -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -it $POD_NAME -- mongo --eval "db.runCommand({ ping: 1 })"
