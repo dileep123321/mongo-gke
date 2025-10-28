@@ -1,7 +1,10 @@
-name: Deploy MongoDB to GKE
+name: CI/CD Pipeline - MongoDB on GKE
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
     branches:
       - main
 
@@ -11,50 +14,63 @@ env:
   GKE_ZONE: us-central1-a
 
 jobs:
-  # ---------------------------
-  # CI STAGE
-  # ---------------------------
+  # --------------------------------------------------------
+  # 🧩 CI SECTION
+  # --------------------------------------------------------
 
   checkout:
     name: Checkout Repository
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
   dependencies:
-    name: Install Dependencies
+    name: Install Linting Tools
     runs-on: ubuntu-latest
     needs: checkout
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Install YAML Linter
-        run: pip install yamllint
+      - name: Install yamllint
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y yamllint
 
   linting:
-    name: Lint YAML Files
+    name: YAML Lint Check
     runs-on: ubuntu-latest
     needs: dependencies
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
+      - name: Run YAML Linter
+        run: |
+          echo "Running yamllint on k8s/ folder..."
+          yamllint k8s/
 
-      - name: Run YAML lint
-        run: yamllint k8s/
+  validate_k8s:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    needs: linting
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Validate Kubernetes YAML
+        run: |
+          echo "Running dry-run validation on manifests..."
+          kubectl apply --dry-run=client -f k8s/ --validate=false
 
-  # ---------------------------
-  # CD STAGE
-  # ---------------------------
+  # --------------------------------------------------------
+  # 🚀 CD SECTION
+  # --------------------------------------------------------
 
   deploy_gke:
     name: Deploy MongoDB to GKE
     runs-on: ubuntu-latest
-    needs: linting
-
+    needs: validate_k8s
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
@@ -75,14 +91,18 @@ jobs:
 
       - name: Get GKE Credentials
         run: |
-          gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE --project $PROJECT_ID
+          gcloud container clusters get-credentials $GKE_CLUSTER \
+            --zone $GKE_ZONE --project $PROJECT_ID
 
-      - name: Deploy MongoDB to GKE
+      - name: Deploy MongoDB Manifests
         run: |
           kubectl apply -f k8s/mongo-configmap.yaml --validate=false
           kubectl apply -f k8s/mongo-secret.yaml --validate=false
           kubectl apply -f k8s/mongo-pvc.yaml --validate=false
           kubectl apply -f k8s/mongo-deployment.yaml --validate=false
           kubectl apply -f k8s/mongo-service.yaml --validate=false
-          kubectl get pods -l app=mongodb
+
+      - name: Verify Deployment
+        run: |
+          kubectl get pods -l app=mongo
           kubectl get svc mongo-service -o wide
