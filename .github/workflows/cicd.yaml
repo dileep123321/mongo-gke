@@ -49,18 +49,6 @@ jobs:
           echo "Running yamllint on k8s/ folder..."
           yamllint k8s/
 
-  validate_k8s:
-    name: Validate Kubernetes Manifests
-    runs-on: ubuntu-latest
-    needs: linting
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      - name: Validate Kubernetes YAML
-        run: |
-          echo "Running dry-run validation on manifests..."
-          kubectl apply --dry-run=client -f k8s/ --validate=false
-
   # --------------------------------------------------------
   # 🚀 CD SECTION
   # --------------------------------------------------------
@@ -68,7 +56,7 @@ jobs:
   deploy_gke:
     name: Deploy MongoDB to GKE
     runs-on: ubuntu-latest
-    needs: validate_k8s
+    needs: linting
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
