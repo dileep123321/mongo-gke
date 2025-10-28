@@ -6,65 +6,51 @@ on:
       - main
 
 jobs:
-  # -------------------------------
-  # 1️⃣ YAML Linting
-  # -------------------------------
+  # ------------------------------
+  # 1️⃣ YAML LINTING STAGE
+  # ------------------------------
   lint:
-    name: YAML Linting
+    name: Lint Kubernetes YAMLs
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install yamllint
-        run: sudo apt-get install -y yamllint
+      - name: Lint Kubernetes YAML files
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: ./k8s
 
-      - name: Run yamllint
-        run: yamllint k8s/
-
-  # -------------------------------
-  # 2️⃣ Trivy Config Scan
-  # -------------------------------
-  trivy_config_scan:
+  # ------------------------------
+  # 2️⃣ TRIVY SECURITY SCAN STAGE
+  # ------------------------------
+  trivy-scan:
     name: Trivy Config Scan
     runs-on: ubuntu-latest
     needs: lint
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Run Trivy config scan
         uses: aquasecurity/trivy-action@0.21.0
         with:
-          scan-type: config
-          scanners: config
-          hide-progress: true
+          scan-type: 'config'                 # Scan Kubernetes YAMLs for misconfigurations
+          input: './k8s'                      # Folder containing manifests
+          exit-code: '0'                      # Change to '1' if you want to fail the pipeline on issues
           ignore-unfixed: true
-          exit-code: 0
-          path: ./k8s
+          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
 
-  # -------------------------------
-  # 3️⃣ Validate Kubernetes Manifests
-  # -------------------------------
-  validate_k8s:
-    name: Validate Kubernetes Manifests
-    runs-on: ubuntu-latest
-    needs: trivy_config_scan
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Validate Kubernetes YAMLs (dry-run)
-        run: |
-          kubectl apply --dry-run=client --validate=false -f k8s/
-
-  # -------------------------------
-  # 4️⃣ Deploy to GKE
-  # -------------------------------
+  # ------------------------------
+  # 3️⃣ DEPLOYMENT STAGE
+  # ------------------------------
   deploy:
     name: Deploy MongoDB to GKE
     runs-on: ubuntu-latest
-    needs: validate_k8s
+    needs: trivy-scan
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -89,6 +75,10 @@ jobs:
         run: |
           gcloud container clusters get-credentials test-demo-cluster \
             --zone us-central1-a --project modern-saga-472703-k3
+
+      - name: Validate K8s manifests
+        run: |
+          kubectl apply --dry-run=client -f k8s/ --validate=false
 
       - name: Deploy MongoDB to GKE
         run: |
@@ -97,40 +87,8 @@ jobs:
           kubectl apply -f k8s/mongo-pvc.yaml --validate=false
           kubectl apply -f k8s/mongo-deployment.yaml --validate=false
           kubectl apply -f k8s/mongo-service.yaml --validate=false
-          kubectl get pods
-          kubectl get svc
 
-  # -------------------------------
-  # 5️⃣ Health Check
-  # -------------------------------
-  health_check:
-    name: Health Check (Post-Deployment)
-    runs-on: ubuntu-latest
-    needs: deploy
-    steps:
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: modern-saga-472703-k3
-          export_default_credentials: true
-
-      - name: Install GKE auth plugin
+      - name: Verify Deployment
         run: |
-          gcloud components install gke-gcloud-auth-plugin --quiet
-          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
-
-      - name: Get GKE credentials
-        run: |
-          gcloud container clusters get-credentials test-demo-cluster \
-            --zone us-central1-a --project modern-saga-472703-k3
-
-      - name: Verify MongoDB Pod & Service
-        run: |
-          echo "Verifying MongoDB Deployment..."
           kubectl get pods -l app=mongo
-          kubectl get svc mongo-service
+          kubectl get svc -l app=mongo
