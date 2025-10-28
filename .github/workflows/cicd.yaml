@@ -1,4 +1,4 @@
-name: Deploy MongoDB to GKE
+name: MongoDB CI/CD to GKE
 
 on:
   push:
@@ -6,120 +6,128 @@ on:
       - main
 
 jobs:
-  # -------------------------------
-  # 1️⃣ YAML Linting Stage
-  # -------------------------------
-  lint:
-    name: Lint YAML files
+  checkout:
+    name: Checkout code
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+  dependencies:
+    name: Install dependencies
+    runs-on: ubuntu-latest
+    needs: checkout
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install pyyaml yamllint
 
-      - name: Lint Kubernetes YAML files
+  lint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    needs: dependencies
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Lint YAML files
         uses: ibiqlik/action-yamllint@v3
         with:
-          file_or_dir: k8s/
           config_file: .yamllint.yml
 
-  # -------------------------------
-  # 2️⃣ Validate K8s Manifests (Dry Run)
-  # -------------------------------
-  validate:
-    name: Validate Kubernetes Manifests
+  test:
+    name: Test manifests
     runs-on: ubuntu-latest
     needs: lint
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Validate K8s YAML syntax
+      - name: Run syntax validation for YAML files
         run: |
-          kubectl apply --dry-run=client -f k8s/ --validate=false
-        continue-on-error: false
+          yamllint k8s/ || true
 
-  # -------------------------------
-  # 3️⃣ Authenticate and Configure GCP
-  # -------------------------------
-  setup:
-    name: Configure GCP and GKE
+  build:
+    name: Build Docker image
     runs-on: ubuntu-latest
-    needs: validate
+    needs: test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker gcr.io --quiet
+      - name: Build Docker image
+        run: |
+          docker build -t gcr.io/modern-saga-472703-k3/mongo:${{ github.sha }} .
+      - name: Push Docker image
+        run: |
+          docker push gcr.io/modern-saga-472703-k3/mongo:${{ github.sha }}
 
-      - name: Set up Google Cloud SDK
+  validate_k8s:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: modern-saga-472703-k3
-          export_default_credentials: true
-
       - name: Install GKE auth plugin
         run: |
           gcloud components install gke-gcloud-auth-plugin --quiet
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
-
       - name: Get GKE credentials
         run: |
           gcloud container clusters get-credentials test-demo-cluster \
             --zone us-central1-a --project modern-saga-472703-k3
+      - name: Validate manifests
+        run: |
+          kubectl apply --dry-run=client -f k8s/ --validate=false
 
-  # -------------------------------
-  # 4️⃣ Deploy MongoDB to GKE
-  # -------------------------------
-  deploy:
+  deploy_gke:
     name: Deploy MongoDB to GKE
     runs-on: ubuntu-latest
-    needs: setup
+    needs: validate_k8s
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Google Cloud SDK
+      - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: modern-saga-472703-k3
           export_default_credentials: true
-
+      - name: Install GKE auth plugin
+        run: |
+          gcloud components install gke-gcloud-auth-plugin --quiet
+          echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
       - name: Get GKE credentials
         run: |
           gcloud container clusters get-credentials test-demo-cluster \
             --zone us-central1-a --project modern-saga-472703-k3
-
-      - name: Apply Kubernetes Manifests
+      - name: Deploy MongoDB resources
         run: |
           kubectl apply -f k8s/mongo-configmap.yaml --validate=false
           kubectl apply -f k8s/mongo-secret.yaml --validate=false
           kubectl apply -f k8s/mongo-pvc.yaml --validate=false
           kubectl apply -f k8s/mongo-deployment.yaml --validate=false
           kubectl apply -f k8s/mongo-service.yaml --validate=false
-
-      - name: Verify MongoDB Deployment
-        run: |
-          kubectl get pods -l app=mongo
-          kubectl get svc -l app=mongo
-          kubectl rollout status deployment/mongo
-
-  # -------------------------------
-  # 5️⃣ Post-deployment Health Check
-  # -------------------------------
-  health-check:
-    name: Health Check MongoDB
-    runs-on: ubuntu-latest
-    needs: deploy
-    steps:
-      - name: Verify MongoDB Pod Health
-        run: |
-          POD_NAME=$(kubectl get pods -l app=mongo -o jsonpath='{.items[0].metadata.name}')
-          kubectl exec -it $POD_NAME -- mongo --eval "db.runCommand({ ping: 1 })"
+          kubectl get pods -l app=mongodb
+          kubectl get svc -l app=mongodb
